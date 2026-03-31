@@ -30,7 +30,7 @@ jobs:
       with:
         version: '1.11'
 
-    - uses: julia-actions/cache@v2
+    - uses: julia-actions/cache@v3
 
     - name: Instantiate docs environment
       run: julia --project=docs -e 'ENV["JULIA_SSL_NO_VERIFY_HOSTS"] = "pkg.julialang.org,github.com"; using Pkg; Pkg.instantiate()'
