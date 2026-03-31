@@ -25,9 +25,10 @@ end
 
 LI-COR gas analyzer / sonic configuration with optional H2O calibration coefficients.
 
-During `check_diagnostics!`, records with `diag_sonic > diag_sonic` threshold are set to
-NaN for wind components and sonic temperature, and records with `diag_gas < diag_gas`
-threshold are set to NaN for H2O and pressure.
+During `check_diagnostics!`, records whose `diag_sonic` value in the data exceeds
+the configured threshold `sensor.diag_sonic` are set to NaN for wind components and
+sonic temperature, and records whose `diag_gas` value in the data is below the
+configured threshold `sensor.diag_gas` are set to NaN for H2O and pressure.
 
 If `calibration_coefficients` is provided, it can be used by gas analyzer correction
 steps (e.g. `H2OCalibration`).
