@@ -36,7 +36,7 @@ struct NoOpLogger <: AbstractProcessingLogger end
 
 @inline log_event!(::NoOpLogger, ::Symbol, ::Symbol; kwargs...) = nothing
 @inline record_stage_time!(::NoOpLogger, ::Symbol, ::Real) = nothing
-@inline write_processing_log(::NoOpLogger, ::AbstractString) = nothing
+@inline write_processing_log(::NoOpLogger, ::AbstractString; append::Bool=false) = nothing
 @inline log_index_runs!(::NoOpLogger, ::Symbol, ::Symbol, ::Union{Symbol,Nothing},
                         ::AbstractVector, ::AbstractVector{Int}; kwargs...) = nothing
 @inline log_mask_runs!(::NoOpLogger, ::Symbol, ::Symbol, ::Union{Symbol,Nothing},
@@ -98,11 +98,35 @@ write_processing_log(logger, "processing.csv")
 mutable struct ProcessingLogger <: AbstractProcessingLogger
     entries::Vector{ProcessingLogEntry}
     stage_durations::Dict{Symbol,Float64}
+    metadata::Dict{String,String}
 end
 
-ProcessingLogger() = ProcessingLogger(ProcessingLogEntry[], Dict{Symbol,Float64}())
+ProcessingLogger() = ProcessingLogger(ProcessingLogEntry[], Dict{Symbol,Float64}(), Dict{String,String}())
 
 @inline is_logging_enabled(::ProcessingLogger) = true
+
+"""
+    log_metadata!(logger, key, value)
+
+Store a metadata key-value pair. Written as `# key = value` comment lines by `write_processing_log`.
+"""
+function log_metadata!(logger::ProcessingLogger, key::String, value::String)
+    logger.metadata[key] = value
+    return nothing
+end
+@inline log_metadata!(::NoOpLogger, ::String, ::String) = nothing
+
+"""
+    reset!(logger::ProcessingLogger)
+
+Clear entries and stage durations while preserving metadata. Useful for reusing
+a logger across multiple days within the same month.
+"""
+function reset!(logger::ProcessingLogger)
+    empty!(logger.entries)
+    empty!(logger.stage_durations)
+    return nothing
+end
 
 # =============================================================================
 # Core logging functions
@@ -141,13 +165,17 @@ function record_stage_time!(logger::ProcessingLogger, stage::Symbol, seconds::Re
 end
 
 """
-    write_processing_log(logger, filepath)
+    write_processing_log(logger, filepath; append=false)
 
 Write all logged events and stage durations to a CSV file.
+When `append=true`, entries are appended without re-writing the metadata header.
 """
-function write_processing_log(logger::ProcessingLogger, filepath::AbstractString)
-    open(filepath, "w") do io
-        _write_header(io)
+function write_processing_log(logger::ProcessingLogger, filepath::AbstractString; append::Bool=false)
+    open(filepath, append ? "a" : "w") do io
+        if !append
+            _write_metadata(io, logger.metadata)
+            _write_header(io)
+        end
         _write_entries(io, logger.entries)
         _write_stage_durations(io, logger.stage_durations)
     end
@@ -263,6 +291,12 @@ end
 
 const _CSV_HEADER = "stage,category,variable,start_timestamp,end_timestamp,duration_seconds,details"
 const _TIME_FORMAT = dateformat"yyyy-mm-ddTHH:MM:SS.s"
+
+function _write_metadata(io::IO, metadata::Dict{String,String})
+    for (k, v) in sort(collect(metadata))
+        println(io, "# ", k, " = ", v)
+    end
+end
 
 @inline _write_header(io::IO) = println(io, _CSV_HEADER)
 

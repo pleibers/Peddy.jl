@@ -42,26 +42,26 @@ const DEFAULT_VARIABLE_METADATA = Dict{Symbol,VariableMetadata}(
         description = "Vertical wind component"
     ),
     :Ts => VariableMetadata(
-        standard_name = "surface_temperature",
-        unit = "K",
-        long_name = "surface temperature",
-        description = "Surface temperature"
+        standard_name = "sonic_temperature",
+        unit = "oC",
+        long_name = "sonic temperature",
+        description = "Sonic temperature"
     ),
     :CO2 => VariableMetadata(
         standard_name = "carbon_dioxide",
-        unit = "ppm",
+        unit = "mmol/m3",
         long_name = "carbon dioxide",
         description = "Carbon dioxide"
     ),
     :H2O => VariableMetadata(
         standard_name = "water_vapor",
-        unit = "ppm",
+        unit = "mmol/m3",
         long_name = "water vapor",
         description = "Water vapor"
     ),
     :P => VariableMetadata(
         standard_name = "air_pressure",
-        unit = "Pa",
+        unit = "kPa",
         long_name = "air pressure",
         description = "Air pressure"
     ),

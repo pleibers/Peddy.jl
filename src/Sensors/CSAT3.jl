@@ -1,5 +1,5 @@
 """
-     CSAT3(; diag_sonic=63)
+     CSAT3(; diag_sonic=4096)
 
  Campbell Scientific CSAT3 sonic anemometer.
 
@@ -8,7 +8,7 @@
  wind components and sonic temperature.
  """
 @kwdef struct CSAT3 <: AbstractSensor
-    diag_sonic::Int = 63
+    diag_sonic::Int = 4096
 end
 needs_data_cols(sensor::CSAT3) = (:diag_sonic, :Ux, :Uy, :Uz, :Ts)
 has_variables(sensor::CSAT3) = (:diag_sonic, :Ux, :Uy, :Uz, :Ts)

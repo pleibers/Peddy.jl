@@ -100,6 +100,31 @@ Arguments
 function process!(pipeline::EddyPipeline, high_frequency_data::DimArray, low_frequency_data::Union{Nothing, DimArray}; kwargs...)
     logger = pipeline.logger
 
+    # Log which pipeline steps are active
+    for (step_name, step_field) in [
+        (:quality_control, pipeline.quality_control),
+        (:gas_analyzer,    pipeline.gas_analyzer),
+        (:despiking,       pipeline.despiking),
+        (:make_continuous, pipeline.make_continuous),
+        (:gap_filling,     pipeline.gap_filling),
+        (:double_rotation, pipeline.double_rotation),
+        (:mrd,             pipeline.mrd),
+    ]
+        log_metadata!(logger, "step_$step_name", step_field === nothing ? "disabled" : string(typeof(step_field)))
+    end
+
+    # Log calibration coefficients if present
+    coeffs = get_calibration_coefficients(pipeline.sensor)
+    if coeffs !== nothing
+        log_metadata!(logger, "calibration_A", string(coeffs.A))
+        log_metadata!(logger, "calibration_B", string(coeffs.B))
+        log_metadata!(logger, "calibration_C", string(coeffs.C))
+        log_metadata!(logger, "calibration_H2O_Zero", string(coeffs.H2O_Zero))
+        log_metadata!(logger, "calibration_H20_Span", string(coeffs.H20_Span))
+    end
+
+    log_metadata!(logger, "sensor_type", string(typeof(pipeline.sensor)))
+
     result = nothing
     total_seconds = @elapsed begin
         prog = ProgressUnknown(;desc="Peddy is cleaning your data...", spinner=true)

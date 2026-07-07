@@ -1,7 +1,7 @@
 name = "Peddy"
 uuid = "0ce30ac1-e258-4977-baf6-e7a1803367e2"
 authors = ["Patrick Leibersperger <patrick.leibersperger@slf.ch>", "Patricia Asemann <patricia.asemann@slf.ch>", "Rainette Engbers <rainette.engbers@slf.ch>"]
-version = "0.1.0"
+version = "0.1.1"
 
 [deps]
 CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
