@@ -372,7 +372,7 @@ end
     for v in (:Ux, :Uy, :Uz, :Ts)
         @test isnan(d[Ti=1500, Var=At(v)])
     end
-    @test !isnan(d[Ti=10, Var=At(:Ux)])   # pre-existing NaN is not propagated
+    @test isnan(d[Ti=10, Var=At(:Ux)]) && isnan(d[Ti=10, Var=At(:Ts)])  # partial NaN from earlier steps too
     d = mk(); d[Ti=1500, Var=At(:Ts)] += 15.0
     despike!(SimpleSigmundDespiking(variable_groups=groups), d, nothing)
     @test isnan(d[Ti=1500, Var=At(:Ts)]) && !isnan(d[Ti=1500, Var=At(:Ux)])  # default: uncoupled

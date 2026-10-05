@@ -52,9 +52,11 @@ based on Sigmund et al. (2022). This despiking method:
   sonic variables (Ux, Uy, Uz, Ts), since Ts and wind come from the same transit times.
   The limit is fixed, so a long sonic fault cannot raise its own threshold as the MAD does.
   Default `nothing` (off).
-- `couple_sonic`: When true, a sample where despiking removes any of Ux, Uy, Uz or Ts loses all
-  four. The sonic derives wind and temperature from the same transit times, so a spike in one
-  means the others are unreliable too. Default `false`.
+- `couple_sonic`: When true, after despiking every sample where any of Ux, Uy, Uz or Ts is NaN
+  loses all four, whatever removed the value (despiking, or the physical limits in quality
+  control, e.g. a saturated Ts of 72 °C next to a saturated Ux of 65 m/s). The sonic derives
+  wind and temperature from the same transit times, so if one is bad the others are too.
+  Default `false`.
 
 # Examples
 ```julia
@@ -133,9 +135,6 @@ function despike!(despiking::SimpleSigmundDespiking, high_frequency_data::DimArr
     
     println("Processing spike detection with window size: $window_size_points points")
 
-    sonic_vars = [v for v in (:Ux, :Uy, :Uz, :Ts) if v in dims(high_frequency_data, Var)]
-    valid_before = despiking.couple_sonic ?
-        [.!isnan.(collect(high_frequency_data[Var=At(v)])) for v in sonic_vars] : nothing
 
     if despiking.max_ts_deviation !== nothing
         _remove_ts_median_outliers!(high_frequency_data, window_size_points,
@@ -185,22 +184,23 @@ function despike!(despiking::SimpleSigmundDespiking, high_frequency_data::DimArr
         end
     end
 
-    if despiking.couple_sonic && !isempty(sonic_vars)
-        _couple_sonic_removals!(high_frequency_data, sonic_vars, valid_before, logger)
+    if despiking.couple_sonic
+        sonic_vars = [v for v in (:Ux, :Uy, :Uz, :Ts) if v in dims(high_frequency_data, Var)]
+        isempty(sonic_vars) || _couple_sonic_removals!(high_frequency_data, sonic_vars, logger)
     end
 end
 
 """
-    _couple_sonic_removals!(high_frequency_data, sonic_vars, valid_before, logger) -> Int
+    _couple_sonic_removals!(high_frequency_data, sonic_vars, logger) -> Int
 
-Set all `sonic_vars` to NaN at samples where despiking removed at least one of them
-(valid before despiking, NaN after). Returns the number of samples affected.
+Set all `sonic_vars` to NaN at samples where at least one of them is NaN.
+Returns the number of samples affected.
 """
-function _couple_sonic_removals!(high_frequency_data::DimArray, sonic_vars, valid_before, logger)
+function _couple_sonic_removals!(high_frequency_data::DimArray, sonic_vars, logger)
     n = length(dims(high_frequency_data, Ti))
     removed = falses(n)
-    for (v, was_valid) in zip(sonic_vars, valid_before)
-        removed .|= was_valid .& isnan.(collect(high_frequency_data[Var=At(v)]))
+    for v in sonic_vars
+        removed .|= isnan.(collect(high_frequency_data[Var=At(v)]))
     end
     n_removed = count(removed)
     n_removed == 0 && return 0
@@ -211,7 +211,7 @@ function _couple_sonic_removals!(high_frequency_data::DimArray, sonic_vars, vali
         n_extra += count(removed .& .!isnan.(col))
         col[removed] .= nan
     end
-    println("    Sonic coupling: $n_removed samples with a removed sonic variable, $n_extra extra values set to NaN")
+    println("    Sonic coupling: $n_removed samples with a missing sonic variable, $n_extra extra values set to NaN")
     logger === nothing || log_event!(logger, :despiking, :sonic_coupling;
                                      samples=n_removed, extra_values=n_extra)
     return n_removed
