@@ -21,13 +21,14 @@ Fields:
 end
 
 """
-    LICOR(; number_type=Float64, diag_sonic=4096, diag_gas=240, calibration_coefficients=nothing)
+    LICOR(; number_type=Float64, diag_sonic=4096, diag_gas=240, diag_margin=0, calibration_coefficients=nothing)
 
 LI-COR gas analyzer / sonic configuration with optional H2O calibration coefficients.
 
 During `check_diagnostics!`, records whose `diag_sonic` value in the data exceeds
 the configured threshold `sensor.diag_sonic` are set to NaN for wind components and
-sonic temperature, and records whose `diag_gas` value in the data is below the
+sonic temperature (together with `diag_margin` records on either side of each flagged
+record), and records whose `diag_gas` value in the data is below the
 configured threshold `sensor.diag_gas` are set to NaN for H2O and pressure.
 
 If `calibration_coefficients` is provided, it can be used by gas analyzer correction
@@ -37,6 +38,8 @@ steps (e.g. `H2OCalibration`).
     number_type::Type{N} = Float64 # needed for calls where COEFF = Nothing
     diag_sonic::Int = 4096
     diag_gas::Int = 240
+    # Records on either side of a sonic diagnostic flag that are also set to NaN
+    diag_margin::Int = 0
     # H2O calibration coefficients (optional)
     calibration_coefficients::COEFF = nothing
 end
@@ -97,7 +100,6 @@ function check_diagnostics!(sensor::LICOR, data::DimArray; kwargs...)
     nan = convert(eltype(diag_gas_col), NaN)
     logger = get(kwargs, :logger, nothing)
     gas_indices = logger === nothing ? nothing : Int[]
-    sonic_indices = logger === nothing ? nothing : Int[]
     for i in eachindex(diag_gas_col)
         if diag_gas_col[i] < sensor.diag_gas
             @debug "Discarding record $i due to diagnostic value $(diag_gas_col[i])"
@@ -105,15 +107,10 @@ function check_diagnostics!(sensor::LICOR, data::DimArray; kwargs...)
             data[Ti=i, Var=At(:H2O)] = nan
             data[Ti=i, Var=At(:P)] = nan
         end
-        if diag_sonic_col[i] > sensor.diag_sonic
-            @debug "Discarding record $i due to sonic diagnostic value $(diag_sonic_col[i])"
-            logger === nothing || push!(sonic_indices, i)
-            data[Ti=i, Var=At(:Ux)] = convert(eltype(data), NaN)
-            data[Ti=i, Var=At(:Uy)] = convert(eltype(data), NaN)
-            data[Ti=i, Var=At(:Uz)] = convert(eltype(data), NaN)
-            data[Ti=i, Var=At(:Ts)] = convert(eltype(data), NaN)
-        end
     end
+    sonic_flagged = findall(>(sensor.diag_sonic), diag_sonic_col)
+    n_margin = discard_sonic_with_margin!(data, sonic_flagged, sensor.diag_margin)
+    sonic_indices = logger === nothing ? nothing : sonic_flagged
     if logger !== nothing
         times = collect(dims(data, Ti))
         if gas_indices !== nothing && !isempty(gas_indices)
@@ -123,6 +120,8 @@ function check_diagnostics!(sensor::LICOR, data::DimArray; kwargs...)
         if sonic_indices !== nothing && !isempty(sonic_indices)
             log_index_runs!(logger, :quality_control, :diagnostic_flag, :diag_sonic, times, sonic_indices;
                             include_run_length=true, threshold=sensor.diag_sonic, affected_variables=[:Ux, :Uy, :Uz, :Ts])
+            n_margin > 0 && log_event!(logger, :quality_control, :diagnostic_margin;
+                                       variable=:diag_sonic, margin=sensor.diag_margin, extra_samples=n_margin)
         end
     end
 end
