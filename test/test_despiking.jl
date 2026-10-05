@@ -360,3 +360,20 @@ end
     @test SimpleSigmundDespiking().max_ts_deviation === nothing
     @test SimpleSigmundDespiking(max_ts_deviation=10).max_ts_deviation == 10.0
 end
+
+@testset "Sonic coupling after despiking" begin
+    n = 3000
+    times = [DateTime(2025, 4, 25) + Millisecond(100 * i) for i in 0:(n - 1)]
+    mk() = DimArray(hcat(5.0 .+ 0.1 .* sin.(1:n), 1.0 .+ 0.1 .* cos.(1:n), 0.1 .* sin.(1:n), -20.0 .+ 0.1 .* sin.(1:n)),
+                    (Ti(times), Var([:Ux, :Uy, :Uz, :Ts])))
+    groups = [VariableGroup("Wind", [:Ux, :Uy, :Uz]), VariableGroup("Temperature", [:Ts])]
+    d = mk(); d[Ti=1500, Var=At(:Ts)] += 15.0; d[Ti=10, Var=At(:Uz)] = NaN  # Ts spike, pre-existing NaN
+    despike!(SimpleSigmundDespiking(variable_groups=groups, couple_sonic=true), d, nothing)
+    for v in (:Ux, :Uy, :Uz, :Ts)
+        @test isnan(d[Ti=1500, Var=At(v)])
+    end
+    @test !isnan(d[Ti=10, Var=At(:Ux)])   # pre-existing NaN is not propagated
+    d = mk(); d[Ti=1500, Var=At(:Ts)] += 15.0
+    despike!(SimpleSigmundDespiking(variable_groups=groups), d, nothing)
+    @test isnan(d[Ti=1500, Var=At(:Ts)]) && !isnan(d[Ti=1500, Var=At(:Ux)])  # default: uncoupled
+end

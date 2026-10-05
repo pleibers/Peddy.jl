@@ -52,6 +52,9 @@ based on Sigmund et al. (2022). This despiking method:
   sonic variables (Ux, Uy, Uz, Ts), since Ts and wind come from the same transit times.
   The limit is fixed, so a long sonic fault cannot raise its own threshold as the MAD does.
   Default `nothing` (off).
+- `couple_sonic`: When true, a sample where despiking removes any of Ux, Uy, Uz or Ts loses all
+  four. The sonic derives wind and temperature from the same transit times, so a spike in one
+  means the others are unreliable too. Default `false`.
 
 # Examples
 ```julia
@@ -83,6 +86,7 @@ struct SimpleSigmundDespiking{N<:Real} <: AbstractDespiking
     use_mad_floor::Bool
     mad_floor::Dict{Symbol,Float64}
     max_ts_deviation::Union{Nothing,Float64}
+    couple_sonic::Bool
     
     function SimpleSigmundDespiking(; window_minutes=5.0,
                                     number_type::Type{N}=Float64,
@@ -94,14 +98,15 @@ struct SimpleSigmundDespiking{N<:Real} <: AbstractDespiking
                                         :Uz => 0.02,
                                         :Ts => 0.02,
                                     ),
-                                    max_ts_deviation::Union{Nothing,Real}=nothing) where {N <: Real}
+                                    max_ts_deviation::Union{Nothing,Real}=nothing,
+                                    couple_sonic::Bool=false) where {N <: Real}
         # Default group if none provided
         if isempty(variable_groups)
             default_group = VariableGroup("Default Sonic", [:Ux, :Uy, :Uz, :Ts], spike_threshold=N(6.0))
             variable_groups = [default_group]
         end
         new{N}(N(window_minutes), variable_groups, use_mad_floor, mad_floor,
-               max_ts_deviation === nothing ? nothing : Float64(max_ts_deviation))
+               max_ts_deviation === nothing ? nothing : Float64(max_ts_deviation), couple_sonic)
     end
 end
 
@@ -127,6 +132,10 @@ function despike!(despiking::SimpleSigmundDespiking, high_frequency_data::DimArr
     timestamps = logger === nothing ? nothing : collect(dims(high_frequency_data, Ti))
     
     println("Processing spike detection with window size: $window_size_points points")
+
+    sonic_vars = [v for v in (:Ux, :Uy, :Uz, :Ts) if v in dims(high_frequency_data, Var)]
+    valid_before = despiking.couple_sonic ?
+        [.!isnan.(collect(high_frequency_data[Var=At(v)])) for v in sonic_vars] : nothing
 
     if despiking.max_ts_deviation !== nothing
         _remove_ts_median_outliers!(high_frequency_data, window_size_points,
@@ -175,6 +184,37 @@ function despike!(despiking::SimpleSigmundDespiking, high_frequency_data::DimArr
             @warn "No variables were processed in group $group_idx: '$(var_group.name)'"
         end
     end
+
+    if despiking.couple_sonic && !isempty(sonic_vars)
+        _couple_sonic_removals!(high_frequency_data, sonic_vars, valid_before, logger)
+    end
+end
+
+"""
+    _couple_sonic_removals!(high_frequency_data, sonic_vars, valid_before, logger) -> Int
+
+Set all `sonic_vars` to NaN at samples where despiking removed at least one of them
+(valid before despiking, NaN after). Returns the number of samples affected.
+"""
+function _couple_sonic_removals!(high_frequency_data::DimArray, sonic_vars, valid_before, logger)
+    n = length(dims(high_frequency_data, Ti))
+    removed = falses(n)
+    for (v, was_valid) in zip(sonic_vars, valid_before)
+        removed .|= was_valid .& isnan.(collect(high_frequency_data[Var=At(v)]))
+    end
+    n_removed = count(removed)
+    n_removed == 0 && return 0
+    nan = convert(eltype(high_frequency_data), NaN)
+    n_extra = 0
+    for v in sonic_vars
+        col = @view high_frequency_data[Var=At(v)]
+        n_extra += count(removed .& .!isnan.(col))
+        col[removed] .= nan
+    end
+    println("    Sonic coupling: $n_removed samples with a removed sonic variable, $n_extra extra values set to NaN")
+    logger === nothing || log_event!(logger, :despiking, :sonic_coupling;
+                                     samples=n_removed, extra_values=n_extra)
+    return n_removed
 end
 
 """
