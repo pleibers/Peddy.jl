@@ -228,3 +228,31 @@ using DimensionalData
         end
     end
 end
+
+@testset "Sonic diagnostic margin" begin
+    n = 50
+    times = [DateTime(2025, 1, 1) + Millisecond(100 * i) for i in 0:(n - 1)]
+    function make_data()
+        m = hcat(fill(1.0, n), fill(2.0, n), fill(0.1, n), fill(-10.0, n),
+                 fill(50.0, n), fill(80.0, n), zeros(n), fill(250.0, n))
+        DimArray(m, (Ti(times), Var([:Ux, :Uy, :Uz, :Ts, :H2O, :P, :diag_sonic, :diag_gas])))
+    end
+
+    # margin 0: only the flagged sample
+    d = make_data(); d[Ti=20, Var=At(:diag_sonic)] = 5000.0
+    check_diagnostics!(LICOR(), d)
+    @test findall(isnan, collect(d[Var=At(:Ts)])) == [20]
+
+    # margin 2: two samples on either side, all four sonic variables, gas untouched
+    d = make_data(); d[Ti=20, Var=At(:diag_sonic)] = 5000.0
+    check_diagnostics!(LICOR(diag_margin=2), d)
+    for v in (:Ux, :Uy, :Uz, :Ts)
+        @test findall(isnan, collect(d[Var=At(v)])) == collect(18:22)
+    end
+    @test !any(isnan, d[Var=At(:H2O)])
+
+    # margin clipped at the series edges, CSAT3 behaves the same
+    d = make_data(); d[Ti=1, Var=At(:diag_sonic)] = 5000.0
+    check_diagnostics!(CSAT3(diag_margin=2), d)
+    @test findall(isnan, collect(d[Var=At(:Ux)])) == [1, 2, 3]
+end

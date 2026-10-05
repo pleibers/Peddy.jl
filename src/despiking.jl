@@ -47,6 +47,16 @@ based on Sigmund et al. (2022). This despiking method:
 - `variable_groups`: Vector of VariableGroup structs, each with its own threshold
 - `use_mad_floor`: When true, clamp MAD values to the per-variable floors in `mad_floor`
 - `mad_floor`: Dict of variable => minimum MAD (default 0.02 for Ux, Uy, Uz, Ts)
+- `max_ts_deviation`: Optional absolute limit (K). Before the MAD filter, every sample whose
+  Ts deviates from the rolling median (same window) by more than this is removed for all
+  sonic variables (Ux, Uy, Uz, Ts), since Ts and wind come from the same transit times.
+  The limit is fixed, so a long sonic fault cannot raise its own threshold as the MAD does.
+  Default `nothing` (off).
+- `couple_sonic`: When true, after despiking every sample where any of Ux, Uy, Uz or Ts is NaN
+  loses all four, whatever removed the value (despiking, or the physical limits in quality
+  control, e.g. a saturated Ts of 72 °C next to a saturated Ux of 65 m/s). The sonic derives
+  wind and temperature from the same transit times, so if one is bad the others are too.
+  Default `false`.
 
 # Examples
 ```julia
@@ -77,6 +87,8 @@ struct SimpleSigmundDespiking{N<:Real} <: AbstractDespiking
     variable_groups::Vector{<:VariableGroup}
     use_mad_floor::Bool
     mad_floor::Dict{Symbol,Float64}
+    max_ts_deviation::Union{Nothing,Float64}
+    couple_sonic::Bool
     
     function SimpleSigmundDespiking(; window_minutes=5.0,
                                     number_type::Type{N}=Float64,
@@ -87,13 +99,16 @@ struct SimpleSigmundDespiking{N<:Real} <: AbstractDespiking
                                         :Uy => 0.02,
                                         :Uz => 0.02,
                                         :Ts => 0.02,
-                                    )) where {N <: Real}
+                                    ),
+                                    max_ts_deviation::Union{Nothing,Real}=nothing,
+                                    couple_sonic::Bool=false) where {N <: Real}
         # Default group if none provided
         if isempty(variable_groups)
             default_group = VariableGroup("Default Sonic", [:Ux, :Uy, :Uz, :Ts], spike_threshold=N(6.0))
             variable_groups = [default_group]
         end
-        new{N}(N(window_minutes), variable_groups, use_mad_floor, mad_floor)
+        new{N}(N(window_minutes), variable_groups, use_mad_floor, mad_floor,
+               max_ts_deviation === nothing ? nothing : Float64(max_ts_deviation), couple_sonic)
     end
 end
 
@@ -119,6 +134,12 @@ function despike!(despiking::SimpleSigmundDespiking, high_frequency_data::DimArr
     timestamps = logger === nothing ? nothing : collect(dims(high_frequency_data, Ti))
     
     println("Processing spike detection with window size: $window_size_points points")
+
+
+    if despiking.max_ts_deviation !== nothing
+        _remove_ts_median_outliers!(high_frequency_data, window_size_points,
+                                    despiking.max_ts_deviation, logger, timestamps)
+    end
     println("Processing $(length(despiking.variable_groups)) variable groups")
     
     # Process each variable group independently
@@ -162,6 +183,38 @@ function despike!(despiking::SimpleSigmundDespiking, high_frequency_data::DimArr
             @warn "No variables were processed in group $group_idx: '$(var_group.name)'"
         end
     end
+
+    if despiking.couple_sonic
+        sonic_vars = [v for v in (:Ux, :Uy, :Uz, :Ts) if v in dims(high_frequency_data, Var)]
+        isempty(sonic_vars) || _couple_sonic_removals!(high_frequency_data, sonic_vars, logger)
+    end
+end
+
+"""
+    _couple_sonic_removals!(high_frequency_data, sonic_vars, logger) -> Int
+
+Set all `sonic_vars` to NaN at samples where at least one of them is NaN.
+Returns the number of samples affected.
+"""
+function _couple_sonic_removals!(high_frequency_data::DimArray, sonic_vars, logger)
+    n = length(dims(high_frequency_data, Ti))
+    removed = falses(n)
+    for v in sonic_vars
+        removed .|= isnan.(collect(high_frequency_data[Var=At(v)]))
+    end
+    n_removed = count(removed)
+    n_removed == 0 && return 0
+    nan = convert(eltype(high_frequency_data), NaN)
+    n_extra = 0
+    for v in sonic_vars
+        col = @view high_frequency_data[Var=At(v)]
+        n_extra += count(removed .& .!isnan.(col))
+        col[removed] .= nan
+    end
+    println("    Sonic coupling: $n_removed samples with a missing sonic variable, $n_extra extra values set to NaN")
+    logger === nothing || log_event!(logger, :despiking, :sonic_coupling;
+                                     samples=n_removed, extra_values=n_extra)
+    return n_removed
 end
 
 """
@@ -387,4 +440,33 @@ function _apply_spike_threshold_and_remove_for_group!(variable_group::VariableGr
     else
         println("    Group $group_index ('$(variable_group.name)'): No spikes detected")
     end
+end
+
+"""
+    _remove_ts_median_outliers!(high_frequency_data, window_size_points, limit, logger, timestamps) -> Int
+
+Set Ux, Uy, Uz and Ts to NaN wherever `|Ts - rolling median(Ts)| > limit` (K), using a
+centered rolling median over `window_size_points`. Returns the number of removed samples.
+"""
+function _remove_ts_median_outliers!(high_frequency_data::DimArray, window_size_points::Int,
+                                     limit::Real, logger, timestamps)
+    :Ts in dims(high_frequency_data, Var) || return 0
+    ts = @view high_frequency_data[Var=At(:Ts)]
+    rolling_median_values = calculate_rolling_median(ts, window_size_points)
+    outliers = findall(i -> !isnan(ts[i]) && !isnan(rolling_median_values[i]) &&
+                            abs(ts[i] - rolling_median_values[i]) > limit, eachindex(ts))
+    isempty(outliers) && return 0
+
+    nan = convert(eltype(high_frequency_data), NaN)
+    for v in (:Ux, :Uy, :Uz, :Ts)
+        v in dims(high_frequency_data, Var) || continue
+        col = @view high_frequency_data[Var=At(v)]
+        col[outliers] .= nan
+    end
+    println("    Ts median check: removed $(length(outliers)) samples with |Ts - median| > $limit K")
+    if logger !== nothing && timestamps !== nothing
+        log_index_runs!(logger, :despiking, :ts_median_deviation, :Ts, timestamps, outliers;
+                        include_run_length=true, limit=limit, affected_variables=[:Ux, :Uy, :Uz, :Ts])
+    end
+    return length(outliers)
 end

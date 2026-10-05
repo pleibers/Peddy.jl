@@ -5,7 +5,7 @@ export get_calibration_coefficients
 using Polynomials
 using Statistics
 
- 
+
 
 """
     get_calibration_coefficients(sensor)
@@ -89,29 +89,73 @@ function solve_polynomial_absorptance(normalized_y_value, calibration_coefficien
 end
 
 """
-    resample_to_low_frequency(high_frequency_data, h2o_var, pressure_var, n_lf, n_hf_per_lf, hf_time)
+    _find_nearest_lf_index(hf_time, lf_times) -> Vector{Int}
 
-Resample high-frequency H2O and pressure data to low-frequency averages.
+For each high-frequency timestamp, find the index of the nearest (by absolute
+time difference) low-frequency timestamp. Returns a vector of LF indices, one
+per HF point.
+"""
+function _find_nearest_lf_index(hf_times, lf_times)
+    n_hf = length(hf_times)
+    n_lf = length(lf_times)
+    indices = Vector{Int}(undef, n_hf)
+
+    # Use a running pointer since both are sorted
+    lf_ptr = 1
+    for i in 1:n_hf
+        t = hf_times[i]
+        # Advance pointer while the next LF point is closer
+        while lf_ptr < n_lf &&
+              abs(Dates.value(lf_times[lf_ptr + 1] - t)) <= abs(Dates.value(lf_times[lf_ptr] - t))
+            lf_ptr += 1
+        end
+        indices[i] = lf_ptr
+    end
+
+    return indices
+end
+
+"""
+    resample_to_low_frequency(high_frequency_data, h2o_var, pressure_var, lf_times, hf_times)
+
+Resample high-frequency H2O and pressure data to low-frequency timestamps using
+timestamp-based matching. For each LF timestamp, averages HF points whose
+nearest LF neighbour is that timestamp.
 
 Returns:
 - low_frequency_h2o_averages: Low-frequency averaged H2O data
 - low_frequency_pressure_averages: Low-frequency averaged pressure data (in Pa)
 """
-function resample_to_low_frequency(high_frequency_data, h2o_variable_name, pressure_variable_name, num_low_freq_points,
-                                   high_freq_points_per_low_freq, high_freq_time)
-    low_frequency_h2o_averages = Vector{eltype(high_frequency_data)}(undef, num_low_freq_points)
-    low_frequency_pressure_averages = Vector{eltype(high_frequency_data)}(undef, num_low_freq_points)
+function resample_to_low_frequency(high_frequency_data, h2o_variable_name, pressure_variable_name,
+                                   lf_times, hf_times, hf_to_lf_indices)
+    n_lf = length(lf_times)
+    T = eltype(high_frequency_data)
+    low_frequency_h2o_averages = fill(T(NaN), n_lf)
+    low_frequency_pressure_averages = fill(T(NaN), n_lf)
 
-    for low_freq_index in 1:num_low_freq_points
-        start_index = (low_freq_index - 1) * high_freq_points_per_low_freq + 1
-        end_index = min(low_freq_index * high_freq_points_per_low_freq, length(high_freq_time))
+    h2o_col = collect(high_frequency_data[Var=At(h2o_variable_name)])
+    pres_col = collect(high_frequency_data[Var=At(pressure_variable_name)])
 
-        if start_index <= length(high_freq_time)
-            low_frequency_h2o_averages[low_freq_index] = mean_skipnan(high_frequency_data[Ti=start_index:end_index, Var=At(h2o_variable_name)])
-            low_frequency_pressure_averages[low_freq_index] = mean_skipnan(high_frequency_data[Ti=start_index:end_index, Var=At(pressure_variable_name)])
-        else
-            low_frequency_h2o_averages[low_freq_index] = NaN
-            low_frequency_pressure_averages[low_freq_index] = NaN
+    # Accumulate sums per LF bin
+    h2o_sum  = zeros(T, n_lf)
+    pres_sum = zeros(T, n_lf)
+    counts   = zeros(Int, n_lf)
+
+    for i in eachindex(hf_to_lf_indices)
+        lf_idx = hf_to_lf_indices[i]
+        h = h2o_col[i]
+        p = pres_col[i]
+        if !isnan(h) && !isnan(p)
+            h2o_sum[lf_idx]  += h
+            pres_sum[lf_idx] += p
+            counts[lf_idx]   += 1
+        end
+    end
+
+    for j in 1:n_lf
+        if counts[j] > 0
+            low_frequency_h2o_averages[j]      = h2o_sum[j] / counts[j]
+            low_frequency_pressure_averages[j]  = pres_sum[j] / counts[j]
         end
     end
 
@@ -152,22 +196,24 @@ function calculate_reference_absorptances(h2o_low_freq_averages, pressure_low_fr
 end
 
 """
-    interpolate_to_high_frequency(li_a_raw_lf, rh_a_raw_lf, n_hf_per_lf, hf_time, n_lf)
+    interpolate_to_high_frequency(li_a_raw_lf, rh_a_raw_lf, hf_to_lf_indices)
 
-Interpolate low-frequency absorptances to high-frequency using forward fill.
+Interpolate low-frequency absorptances to high-frequency using the precomputed
+nearest-neighbour index mapping.
 
 Returns:
 - li_a_raw_hf: LI raw absorptances at high frequency
 - rh_a_raw_hf: RH reference raw absorptances at high frequency
 """
-function interpolate_to_high_frequency(licor_raw_absorptances_low_freq, reference_raw_absorptances_low_freq, high_freq_points_per_low_freq, high_freq_time, num_low_freq_points)
-    licor_raw_absorptances_high_freq = Vector{eltype(licor_raw_absorptances_low_freq)}(undef, length(high_freq_time))
-    reference_raw_absorptances_high_freq = Vector{eltype(licor_raw_absorptances_low_freq)}(undef, length(high_freq_time))
+function interpolate_to_high_frequency(licor_raw_absorptances_low_freq, reference_raw_absorptances_low_freq, hf_to_lf_indices)
+    n_hf = length(hf_to_lf_indices)
+    licor_raw_absorptances_high_freq = Vector{eltype(licor_raw_absorptances_low_freq)}(undef, n_hf)
+    reference_raw_absorptances_high_freq = Vector{eltype(licor_raw_absorptances_low_freq)}(undef, n_hf)
 
-    for high_freq_index in 1:length(high_freq_time)
-        low_freq_index = min(div(high_freq_index - 1, high_freq_points_per_low_freq) + 1, num_low_freq_points)
-        licor_raw_absorptances_high_freq[high_freq_index] = licor_raw_absorptances_low_freq[low_freq_index]
-        reference_raw_absorptances_high_freq[high_freq_index] = reference_raw_absorptances_low_freq[low_freq_index]
+    for i in 1:n_hf
+        lf_idx = hf_to_lf_indices[i]
+        licor_raw_absorptances_high_freq[i] = licor_raw_absorptances_low_freq[lf_idx]
+        reference_raw_absorptances_high_freq[i] = reference_raw_absorptances_low_freq[lf_idx]
     end
 
     return licor_raw_absorptances_high_freq, reference_raw_absorptances_high_freq
@@ -208,11 +254,12 @@ Apply H2O calibration correction to gas analyzer measurements.
 
 This function:
 1. Extracts calibration coefficients from gas_analyzer or sensor
-2. Resamples high-frequency data to low-frequency intervals
-3. Computes reference H2O from RH and temperature in slow data
-4. Calculates absorptances using calibration polynomial
-5. Applies bias correction to high-frequency H2O measurements
-6. Replaces original H2O variable with corrected data in-place
+2. Builds a timestamp-based mapping between high-frequency and low-frequency data
+3. Resamples high-frequency data to low-frequency intervals
+4. Computes reference H2O from RH and temperature in slow data
+5. Calculates absorptances using calibration polynomial
+6. Applies bias correction to high-frequency H2O measurements
+7. Replaces original H2O variable with corrected data in-place
 
 Parameters:
 - gas_analyzer: H2OCalibration configuration
@@ -231,38 +278,44 @@ function correct_gas_analyzer!(gas_analyzer::H2OCalibration, high_frequency_data
 
     println("Using calibration coefficients from sensor: $(typeof(sensor))")
 
-    # Get time dimensions and frequencies
-    high_freq_time = dims(high_frequency_data, Ti)
-    low_freq_time = dims(low_frequency_data, Ti)
+    # Get time dimensions
+    hf_times = collect(dims(high_frequency_data, Ti))
+    lf_times = collect(dims(low_frequency_data, Ti))
 
-    # Calculate frequencies (assuming regular sampling)
-    low_freq_sampling_interval = low_freq_time[2] - low_freq_time[1]
-    high_freq_sampling_interval = high_freq_time[2] - high_freq_time[1]
-    num_low_freq_points = length(low_freq_time)
-    high_freq_points_per_low_freq = Int(round(low_freq_sampling_interval / high_freq_sampling_interval))
+    # Check temporal overlap
+    hf_start, hf_end = extrema(hf_times)
+    lf_start, lf_end = extrema(lf_times)
+    if lf_end < hf_start || lf_start > hf_end
+        @warn "No temporal overlap between high-frequency ($(hf_start)–$(hf_end)) and low-frequency ($(lf_start)–$(lf_end)) data. H2O calibration skipped."
+        return nothing
+    end
+
+    # Build timestamp-based mapping: for each HF point, find nearest LF point
+    hf_to_lf_indices = _find_nearest_lf_index(hf_times, lf_times)
 
     # Extract required variables
-    temperature_data = low_frequency_data[Var(At(gas_analyzer.temp_var))]
-    relative_humidity_data = low_frequency_data[Var(At(gas_analyzer.rh_var))] * 100  # Convert to percentage
+    temperature_data = collect(low_frequency_data[Var(At(gas_analyzer.temp_var))])
+    relative_humidity_data = collect(low_frequency_data[Var(At(gas_analyzer.rh_var))]) .* 100  # Convert to percentage
     h2o_variable = gas_analyzer.h2o_variable
     pressure_variable = gas_analyzer.pressure_var
 
-    # Step 1: Resample high-frequency data to low-frequency
-    h2o_low_freq_averages, pressure_low_freq_averages = resample_to_low_frequency(high_frequency_data, h2o_variable,
-                                                                                  pressure_variable, num_low_freq_points, high_freq_points_per_low_freq,
-                                                                                  high_freq_time)
+    # Step 1: Resample high-frequency data to low-frequency (timestamp-aligned)
+    h2o_low_freq_averages, pressure_low_freq_averages = resample_to_low_frequency(
+        high_frequency_data, h2o_variable, pressure_variable,
+        lf_times, hf_times, hf_to_lf_indices)
 
     # Step 2: Calculate reference absorptances
-    licor_raw_absorptances_low_freq, reference_raw_absorptances_low_freq = calculate_reference_absorptances(h2o_low_freq_averages, pressure_low_freq_averages,
-                                                                                                            relative_humidity_data, temperature_data, calibration_coefficients)
+    licor_raw_absorptances_low_freq, reference_raw_absorptances_low_freq = calculate_reference_absorptances(
+        h2o_low_freq_averages, pressure_low_freq_averages,
+        relative_humidity_data, temperature_data, calibration_coefficients)
 
-    # Step 3: Interpolate absorptances to high frequency
-    licor_raw_absorptances_high_freq, reference_raw_absorptances_high_freq = interpolate_to_high_frequency(licor_raw_absorptances_low_freq, reference_raw_absorptances_low_freq,
-                                                                                                           high_freq_points_per_low_freq, high_freq_time, num_low_freq_points)
+    # Step 3: Interpolate absorptances to high frequency (timestamp-aligned)
+    licor_raw_absorptances_high_freq, reference_raw_absorptances_high_freq = interpolate_to_high_frequency(
+        licor_raw_absorptances_low_freq, reference_raw_absorptances_low_freq, hf_to_lf_indices)
 
     # Step 4: Apply bias correction to high-frequency data
-    h2o_measurements = high_frequency_data[Var(At(gas_analyzer.h2o_variable))]
-    pressure_measurements = high_frequency_data[Var(At(gas_analyzer.pressure_var))] .* 1000  # Convert to Pa
+    h2o_measurements = collect(high_frequency_data[Var(At(gas_analyzer.h2o_variable))])
+    pressure_measurements = collect(high_frequency_data[Var(At(gas_analyzer.pressure_var))]) .* 1000  # Convert to Pa
 
     h2o_corrected_concentrations = apply_bias_correction(h2o_measurements, pressure_measurements, licor_raw_absorptances_high_freq, reference_raw_absorptances_high_freq,
                                                         calibration_coefficients)

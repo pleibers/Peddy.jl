@@ -178,6 +178,7 @@ export check_diagnostics!, quality_control!, despike!, fill_gaps!, correct_gas_a
     rotate!, decompose!, make_continuous!
 export AbstractProcessingLogger, ProcessingLogger, NoOpLogger,
        log_event!, record_stage_time!, write_processing_log,
-       log_index_runs!, log_mask_runs!, is_logging_enabled
+       log_index_runs!, log_mask_runs!, is_logging_enabled,
+       log_metadata!, reset!
 
 end

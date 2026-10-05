@@ -338,3 +338,42 @@ using Dates
         @test all(isnan, res)
     end
 end
+
+@testset "Ts rolling-median check" begin
+    n = 3000  # 5 min at 10 Hz
+    times = [DateTime(2025, 4, 25) + Millisecond(100 * i) for i in 0:(n - 1)]
+    function make_data()
+        m = hcat(fill(5.0, n), fill(1.0, n), 0.1 .* sin.(1:n), -20.0 .+ 0.01 .* sin.(1:n))
+        DimArray(m, (Ti(times), Var([:Ux, :Uy, :Uz, :Ts])))
+    end
+    window = Peddy._calculate_window_size(make_data(), 5.0)
+
+    d = make_data(); d[Ti=1000, Var=At(:Ts)] += 12.0; d[Ti=2000, Var=At(:Ts)] += 8.0
+    nremoved = Peddy._remove_ts_median_outliers!(d, window, 10.0, nothing, nothing)
+    @test nremoved == 1
+    for v in (:Ux, :Uy, :Uz, :Ts)
+        @test isnan(d[Ti=1000, Var=At(v)])
+        @test !isnan(d[Ti=2000, Var=At(v)])
+    end
+
+    # option off by default: despike! does not run the check
+    @test SimpleSigmundDespiking().max_ts_deviation === nothing
+    @test SimpleSigmundDespiking(max_ts_deviation=10).max_ts_deviation == 10.0
+end
+
+@testset "Sonic coupling after despiking" begin
+    n = 3000
+    times = [DateTime(2025, 4, 25) + Millisecond(100 * i) for i in 0:(n - 1)]
+    mk() = DimArray(hcat(5.0 .+ 0.1 .* sin.(1:n), 1.0 .+ 0.1 .* cos.(1:n), 0.1 .* sin.(1:n), -20.0 .+ 0.1 .* sin.(1:n)),
+                    (Ti(times), Var([:Ux, :Uy, :Uz, :Ts])))
+    groups = [VariableGroup("Wind", [:Ux, :Uy, :Uz]), VariableGroup("Temperature", [:Ts])]
+    d = mk(); d[Ti=1500, Var=At(:Ts)] += 15.0; d[Ti=10, Var=At(:Uz)] = NaN  # Ts spike, pre-existing NaN
+    despike!(SimpleSigmundDespiking(variable_groups=groups, couple_sonic=true), d, nothing)
+    for v in (:Ux, :Uy, :Uz, :Ts)
+        @test isnan(d[Ti=1500, Var=At(v)])
+    end
+    @test isnan(d[Ti=10, Var=At(:Ux)]) && isnan(d[Ti=10, Var=At(:Ts)])  # partial NaN from earlier steps too
+    d = mk(); d[Ti=1500, Var=At(:Ts)] += 15.0
+    despike!(SimpleSigmundDespiking(variable_groups=groups), d, nothing)
+    @test isnan(d[Ti=1500, Var=At(:Ts)]) && !isnan(d[Ti=1500, Var=At(:Ux)])  # default: uncoupled
+end
